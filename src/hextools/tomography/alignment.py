@@ -6,6 +6,7 @@ import numpy as np
 import scipy.ndimage as ndi
 from bluesky import plan_stubs as bps
 from bluesky import plans as bp
+from bluesky import preprocessors as bpp
 from bluesky_tiled_plugins.clients.bluesky_run import BlueskyRunV3
 from ophyd_async.epics.adkinetix import KinetixDetector
 from ophyd_async.epics.motor import Motor as AsyncEpicsMotor
@@ -399,14 +400,32 @@ def tomo_alignment_scan(
             det.driver.acquire_period, exposure_time + 0.002
         )  # TODO: Don't hard code this
 
-    yield from bps.open_run()
+    md = {
+        "plan_name": "tomo_alignment_scan",
+        "detectors": [det.name for det in dets],
+        "motors": [rotation_stage.name],
+        "num_points": num_projections,
+        "hints": {"dimensions": [(rotation_stage.hints["fields"], "primary")]},
+    }
 
-    # Optionally, take a single flat image
-    if abs(base_x_offset) > 0.0 and sample_stage_x is not None:
-        yield from bps.mvr(sample_stage_x, base_x_offset)
-        flat_uid = yield from bps.trigger_and_read(dets, name="flatfield")
-        yield from bps.mvr(sample_stage_x, -base_x_offset)
+    def _run():
+        yield from bps.open_run(md=md)
 
-    yield from bp.scan(
-        dets, rotation_stage, init_angle, stop_angle, num_projections, md=_md
-    )
+        # Optionally, take a single flat image into the "flatfield" stream
+        if abs(base_x_offset) > 0.0 and sample_stage_x is not None:
+            yield from bps.mvr(sample_stage_x, base_x_offset)
+            yield from bps.trigger_and_read(dets, name="flatfield")
+            yield from bps.mvr(sample_stage_x, -base_x_offset)
+
+        # bp.scan is kept as the projection loop; stub_wrapper strips its own
+        # open_run/close_run (and stage/unstage) so it nests inside this run as
+        # the "primary" stream.
+        yield from bpp.stub_wrapper(
+            bp.scan(dets, rotation_stage, init_angle, stop_angle, num_projections)
+        )
+
+        yield from bps.close_run()
+
+    # stub_wrapper drops bp.scan's own staging, so stage/unstage the devices here
+    # (unstage is where the ophyd-async writer closes the file and disarms capture).
+    yield from bpp.stage_wrapper(_run(), [*dets, rotation_stage])

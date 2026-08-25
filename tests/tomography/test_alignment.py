@@ -80,6 +80,18 @@ from bluesky import plans as bp, plan_stubs as bps
             -np.sin(np.linspace(0, np.pi, 7)),
             1,
         ),
+        # Upward parabola: vertex sags below the chord -> positive sign
+        (
+            np.array([-2.0, -1.0, 0.0, 1.0, 2.0]),
+            np.array([-2.0, -1.0, 0.0, 1.0, 2.0]) ** 2,
+            1,
+        ),
+        # Downward parabola: vertex bulges above the chord -> negative sign
+        (
+            np.array([-2.0, -1.0, 0.0, 1.0, 2.0]),
+            -(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]) ** 2),
+            -1,
+        ),
     ],
 )
 def test_identify_sign_tilt_angle(x, y, expected_sign):
@@ -189,6 +201,13 @@ def test_ensure_run_is_valid(
         )
 
 
+def _clear_pixels(image: BinaryImage, pixels: list[tuple[int, int]]) -> BinaryImage:
+    image = image.copy()
+    for row, col in pixels:
+        image[row, col] = False
+    return image
+
+
 @pytest.mark.parametrize(
     ("input_image", "size_threshold", "expected_output"),
     [
@@ -198,7 +217,8 @@ def test_ensure_run_is_valid(
             100,
             np.zeros((50, 50), dtype=bool),
         ),
-        # Single large blob in center survives cleaning
+        # Large blob survives (corners rounded by opening): binary_opening
+        # (iterations=2, cross element) clips 3 pixels off each corner.
         (
             np.pad(
                 np.ones((30, 30), dtype=bool),
@@ -206,10 +226,18 @@ def test_ensure_run_is_valid(
                 constant_values=False,
             ),
             100,
-            np.pad(
-                np.ones((30, 30), dtype=bool),
-                pad_width=10,
-                constant_values=False,
+            _clear_pixels(
+                np.pad(
+                    np.ones((30, 30), dtype=bool),
+                    pad_width=10,
+                    constant_values=False,
+                ),
+                [
+                    (10, 10), (10, 11), (11, 10),  # top-left
+                    (10, 38), (10, 39), (11, 39),  # top-right
+                    (38, 10), (39, 10), (39, 11),  # bottom-left
+                    (38, 39), (39, 38), (39, 39),  # bottom-right
+                ],
             ),
         ),
         # Small object below threshold is removed
@@ -239,32 +267,32 @@ def test_clean_image(input_image, size_threshold: int, expected_output: BinaryIm
     np.testing.assert_array_equal(result, expected_output)
 
 
-# @pytest.mark.parametrize(
-#     ("width", "height", "left", "right", "top", "bottom"),
-#     [
-#         (100, 100, 10, 10, 10, 10),
-#         (1000, 2000, 0, 0, 500, 500),
-#         (200, 200, 99, 0, 0, 99),
-#     ],
-# )
-# def test_check_crop_values_valid(width, height, left, right, top, bottom):
-#     assert check_crop_values_valid(width, height, left, right, top, bottom)
+@pytest.mark.parametrize(
+    ("width", "height", "left", "right", "top", "bottom"),
+    [
+        (100, 100, 10, 10, 10, 10),
+        (1000, 2000, 0, 0, 500, 500),
+        (200, 200, 99, 0, 0, 99),
+    ],
+)
+def test_check_crop_values_valid(width, height, left, right, top, bottom):
+    assert check_crop_values_valid(width, height, left, right, top, bottom)
 
 
-# @pytest.mark.parametrize(
-#     ("width", "height", "left", "right", "top", "bottom", "match"),
-#     [
-#         (100, 100, -1, 0, 0, 0, "non-negative"),
-#         (100, 100, 0, -5, 0, 0, "non-negative"),
-#         (100, 100, 0, 0, -1, 0, "non-negative"),
-#         (100, 100, 0, 0, 0, -1, "non-negative"),
-#         (100, 100, 50, 50, 0, 0, "less than the projection width"),
-#         (100, 100, 0, 0, 60, 50, "less than the projection height"),
-#     ],
-# )
-# def test_check_crop_values_invalid(width, height, left, right, top, bottom, match):
-#     with pytest.raises(ValueError, match=match):
-#         check_crop_values_valid(width, height, left, right, top, bottom)
+@pytest.mark.parametrize(
+    ("width", "height", "left", "right", "top", "bottom", "match"),
+    [
+        (100, 100, -1, 0, 0, 0, "non-negative"),
+        (100, 100, 0, -5, 0, 0, "non-negative"),
+        (100, 100, 0, 0, -1, 0, "non-negative"),
+        (100, 100, 0, 0, 0, -1, "non-negative"),
+        (100, 100, 50, 50, 0, 0, "less than the projection width"),
+        (100, 100, 0, 0, 60, 50, "less than the projection height"),
+    ],
+)
+def test_check_crop_values_invalid(width, height, left, right, top, bottom, match):
+    with pytest.raises(ValueError, match=match):
+        check_crop_values_valid(width, height, left, right, top, bottom)
 
 
 @pytest.mark.parametrize(
@@ -305,19 +333,6 @@ def test_fit_points_to_ellipse_on_known_ellipse():
     np.testing.assert_allclose(b_minor, 2 * b, atol=0.5)
     np.testing.assert_allclose(xc, 0.0, atol=0.1)
     np.testing.assert_allclose(yc, 0.0, atol=0.1)
-
-
-def test_identify_sign_tilt_angle():
-    # Test with points forming a downward-opening parabola
-    x = np.array([-2, -1, 0, 1, 2])
-    y = -x**2
-    sign = identify_sign_tilt_angle(x, y)
-    assert sign == 1
-
-    # Test with points forming an upward-opening parabola
-    y = x**2
-    sign = identify_sign_tilt_angle(x, y)
-    assert sign == -1
 
 
 @pytest.fixture
@@ -480,29 +495,43 @@ async def test_tomo_alignment_scan(
         cache_docs,  # type:ignore
     )
 
-    expecting_flat_run = base_x_offset > 0.0 and include_sample_stage_x
+    expecting_flat_stream = base_x_offset > 0.0 and include_sample_stage_x
 
     assert await rotation_motor.velocity.get_value() == max_velocity
     assert await photon_shutter.status.get_value()
 
-    for doc_type in ["start", "descriptor", "stream_resource", "stop"]:
-        assert len(docs[doc_type]) == 2 if expecting_flat_run else 1
+    # Detectors and rotation stage must be staged/unstaged around the run;
+    # unstage is where the ophyd-async writer closes its file and disarms capture.
+    assert {msg.obj for msg in messages_by_type["stage"]} == {ktx1, rotation_motor}
+    assert {msg.obj for msg in messages_by_type["unstage"]} == {ktx1, rotation_motor}
 
+    # Single run now; the flat-field, when taken, is a "flatfield" stream inside it.
+    assert len(runs.run_start_uids) == 1
+    assert len(docs["start"]) == 1
+    assert len(docs["stop"]) == 1
+
+    assert docs["start"][0]["plan_name"] == "tomo_alignment_scan"
+    assert docs["start"][0]["num_points"] == num_projections
+
+    expected_num_streams = 2 if expecting_flat_stream else 1
+    assert len(docs["descriptor"]) == expected_num_streams
+    # One detector, one run -> a single tiff stream_resource shared by both streams.
+    assert len(docs["stream_resource"]) == 1
+    stream_names = {desc["name"] for desc in docs["descriptor"]}
+    assert stream_names == (
+        {"primary", "flatfield"} if expecting_flat_stream else {"primary"}
+    )
+
+    expected_num_events = (
+        num_projections + 1 if expecting_flat_stream else num_projections
+    )
     for doc_type in ["stream_datum", "event"]:
-        expected_num_events = (
-            num_projections + 1 if expecting_flat_run else num_projections
-        )
         assert len(docs[doc_type]) == expected_num_events
 
     assert await ktx1.driver.acquire_time.get_value() == exposure_time
     assert await rotation_motor.user_readback.get_value() == stop_angle
 
-    if not expecting_flat_run:
-        assert len(runs.run_start_uids) == 1
-    else:
-        assert len(runs.run_start_uids) == 2
-        assert docs["start"][1]["flat_uid"] == runs.run_start_uids[0]
-
+    if expecting_flat_stream:
         sample_staged_move_counter = 0
         for msg in messages_by_type["set"]:
             if msg.obj == sample_stage_x:
@@ -514,9 +543,9 @@ async def test_tomo_alignment_scan(
         assert sample_staged_move_counter == 2
         assert await sample_stage_x.user_readback.get_value() == 0.0
 
-    for i, msg in enumerate(messages):
-        if msg.command == "open_run" and msg.kwargs["plan_name"] == "scan":
-            send_motor_to_init_msg = messages[i + 2]
-            assert send_motor_to_init_msg.command == "set"
-            assert send_motor_to_init_msg.obj == rotation_motor
-            assert send_motor_to_init_msg.args == np.float64(init_angle)
+    # The projection scan drives the rotation stage from init_angle to stop_angle.
+    rotation_setpoints = [
+        msg.args[0] for msg in messages_by_type["set"] if msg.obj is rotation_motor
+    ]
+    assert rotation_setpoints[0] == np.float64(init_angle)
+    assert rotation_setpoints[-1] == np.float64(stop_angle)
