@@ -2,7 +2,7 @@
 
 from typing import Hashable
 
-from ophyd_async.core import AsyncMovable, AsyncStatus, wait_for_value
+from ophyd_async.core import AsyncMovable, AsyncStatus, StrictEnum, wait_for_value
 from bluesky import plan_stubs as bps
 from ophyd_async.epics.core import (
     EpicsDevice,
@@ -10,8 +10,11 @@ from ophyd_async.epics.core import (
     epics_triggerable_command,
 )
 
+class ShutterStatus(StrictEnum):
+    OPEN = "Open"
+    NOT_OPEN = "Not Open"
 
-class Shutter(EpicsDevice, AsyncMovable[bool]):
+class Shutter(EpicsDevice, AsyncMovable[ShutterStatus]):
     """Photon shutter device.
 
     Attributes
@@ -27,18 +30,18 @@ class Shutter(EpicsDevice, AsyncMovable[bool]):
     def __init__(self, prefix: str, name: str = ""):
 
         super().__init__(prefix, name=name)
-        self.status = epics_signal_r(bool, f"{prefix}Pos-Sts")
+        self.status = epics_signal_r(ShutterStatus, f"{prefix}Pos-Sts")
         self.open_cmd = epics_triggerable_command(f"{prefix}Cmd:Opn-Cmd")
         self.close_cmd = epics_triggerable_command(f"{prefix}Cmd:Cls-Cmd")
 
     @AsyncStatus.wrap
-    async def set(self, value: bool):
+    async def set(self, value: ShutterStatus):
         """Set the state of the shutter.
 
         Parameters
         ----------
-        value : bool
-            The desired state of the shutter (True for open, False for closed)
+        value : ShutterStatus
+            The desired state of the shutter (ShutterStatus.OPEN for open, ShutterStatus.NOT_OPEN for closed)
 
         Returns
         -------
@@ -46,7 +49,7 @@ class Shutter(EpicsDevice, AsyncMovable[bool]):
             An object representing the status of the set operation.
         """
 
-        if value:
+        if value == ShutterStatus.OPEN:
             cmd_sig = self.open_cmd
         else:
             cmd_sig = self.close_cmd
@@ -69,7 +72,7 @@ def ensure_shutter_state(
     shutter : Shutter
         shutter to guarantee the state of.
     desired_state : bool
-        the state that the shutter should be in (True for open, False for closed)
+        the state of the shutter (True for open, False for closed)
     allow_actuation : bool, default False
         whether to allow the plan to actuate the shutter if it is not in the desired state
     group : Hashable | None, optional
@@ -78,10 +81,11 @@ def ensure_shutter_state(
         whether to wait for the shutter to reach the desired state after actuation
     """
 
+    target = ShutterStatus.OPEN if desired_state else ShutterStatus.NOT_OPEN
     shutter_status = yield from bps.rd(shutter.status)
-    if shutter_status != desired_state:
+    if shutter_status != target:
         if allow_actuation:
-            yield from bps.abs_set(shutter, desired_state, group=group, wait=wait)
+            yield from bps.abs_set(shutter, target, group=group, wait=wait)
         else:
             raise RuntimeError(f"Shutter {shutter.name} is not in the desired state!")
 
