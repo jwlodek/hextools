@@ -12,9 +12,9 @@ from ophyd_async.epics.core import (
 
 class ShutterStatus(StrictEnum):
     OPEN = "Open"
-    NOT_OPEN = "Not Open"
+    CLOSED = "Not Open"
 
-class Shutter(EpicsDevice, AsyncMovable[ShutterStatus]):
+class Shutter(EpicsDevice, AsyncMovable[bool]):
     """Photon shutter device.
 
     Attributes
@@ -35,13 +35,13 @@ class Shutter(EpicsDevice, AsyncMovable[ShutterStatus]):
         self.close_cmd = epics_triggerable_command(f"{prefix}Cmd:Cls-Cmd")
 
     @AsyncStatus.wrap
-    async def set(self, value: ShutterStatus):
+    async def set(self, value: bool):
         """Set the state of the shutter.
 
         Parameters
         ----------
-        value : ShutterStatus
-            The desired state of the shutter (ShutterStatus.OPEN for open, ShutterStatus.NOT_OPEN for closed)
+        value : bool
+            The desired state of the shutter (True for open, False for closed)
 
         Returns
         -------
@@ -49,13 +49,13 @@ class Shutter(EpicsDevice, AsyncMovable[ShutterStatus]):
             An object representing the status of the set operation.
         """
 
-        if value == ShutterStatus.OPEN:
+        if value:
             cmd_sig = self.open_cmd
         else:
             cmd_sig = self.close_cmd
 
         await cmd_sig.execute()
-        await wait_for_value(self.status, value, timeout=10)
+        await wait_for_value(self.status, ShutterStatus.OPEN if value else ShutterStatus.CLOSED, timeout=10)
 
 
 def ensure_shutter_state(
@@ -81,11 +81,10 @@ def ensure_shutter_state(
         whether to wait for the shutter to reach the desired state after actuation
     """
 
-    target = ShutterStatus.OPEN if desired_state else ShutterStatus.NOT_OPEN
     shutter_status = yield from bps.rd(shutter.status)
-    if shutter_status != target:
+    if shutter_status != desired_state:
         if allow_actuation:
-            yield from bps.abs_set(shutter, target, group=group, wait=wait)
+            yield from bps.abs_set(shutter, desired_state, group=group, wait=wait)
         else:
             raise RuntimeError(f"Shutter {shutter.name} is not in the desired state!")
 
