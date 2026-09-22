@@ -82,11 +82,12 @@ def ensure_shutter_state(
     """
 
     shutter_status = yield from bps.rd(shutter.status)
-    if shutter_status != desired_state:
+    desired_status = ShutterStatus.OPEN if desired_state else ShutterStatus.CLOSED
+    if shutter_status != desired_status:
         if allow_actuation:
             yield from bps.abs_set(shutter, desired_state, group=group, wait=wait)
         else:
-            raise RuntimeError(f"Shutter {shutter.name} is not in the desired state!")
+            raise ValueError(f"{shutter.name} is {shutter_status.value.lower()}, but the desired state is {'open' if desired_state else 'closed'}!")
 
 
 def ensure_shutter_open(

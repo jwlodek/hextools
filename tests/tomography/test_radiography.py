@@ -17,6 +17,7 @@ from ophyd_async.epics.adcore import ADBaseDataType, ADWriterFactory, NDPluginFi
 from ophyd_async.epics.adkinetix import KinetixDetector
 
 from hextools.photon_delivery_system import Shutter
+from hextools.photon_delivery_system.shutter import ShutterStatus
 from hextools.tomography.radiography import FRAME_PERIOD_MARGIN, take_radiograph
 
 # --- shutters: same shape as tests/tomography/test_alignment.py ---------------
@@ -29,10 +30,12 @@ def shutter_factory() -> Callable[[str], Shutter]:
             shutter = Shutter(name, name=name)
         # the only two arcs Shutter.set awaits: a command put flips the status readback
         callback_on_mock_execute(
-            shutter.open_cmd, lambda *_: set_mock_value(shutter.status, True)
+            shutter.open_cmd,
+            lambda *_: set_mock_value(shutter.status, ShutterStatus.OPEN),
         )
         callback_on_mock_execute(
-            shutter.close_cmd, lambda *_: set_mock_value(shutter.status, False)
+            shutter.close_cmd,
+            lambda *_: set_mock_value(shutter.status, ShutterStatus.CLOSED),
         )
         return shutter
 
@@ -100,7 +103,9 @@ async def test_take_radiograph_single_row(
 ):
     # the profile sets this; tests do not load the profile
     monkeypatch.setenv("OPHYD_ASYNC_PRESERVE_DETECTOR_STATE", "YES")
-    exposure_time, num_images, num_acquisitions, wait = 0.1, 10, 5, 0.01
+    # the gap has to exceed the time an acquisition takes, otherwise bp.count
+    # has no time left to sleep between acquisitions
+    exposure_time, num_images, num_acquisitions, wait = 0.1, 10, 5, 0.2
 
     fe_shutter, photon_shutter = two_shutters
     ktx = kinetix_hdf_factory(1)
@@ -141,13 +146,17 @@ async def test_take_radiograph_single_row(
     assert start["plan_name"] == "take_radiograph"
 
     sleeps = messages_by_type.get("sleep", [])
-    assert len(sleeps) == num_acquisitions - 1
+    # a scalar delay is repeated forever, so bp.count also sleeps after the
+    # final acquisition
+    assert len(sleeps) == num_acquisitions
     # bp.count subtracts elapsed time from the delay, so each sleep is <= wait
     assert all(0 < m.args[0] <= wait for m in sleeps)
 
     assert await ktx.driver.acquire_time.get_value() == exposure_time
     assert await ktx.driver.num_images.get_value() == num_images
-    assert await photon_shutter.status.get_value() is False  # finalizer closed it
+    assert (
+        await photon_shutter.status.get_value() is ShutterStatus.CLOSED
+    )  # finalizer closed it
 
     assert await ktx.driver.acquire_period.get_value() == pytest.approx(
         exposure_time + FRAME_PERIOD_MARGIN

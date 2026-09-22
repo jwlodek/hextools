@@ -8,6 +8,7 @@ import numpy as np
 import scipy.ndimage as ndi
 from bluesky import plan_stubs as bps
 from bluesky import plans as bp
+import bluesky.preprocessors as bpp
 from bluesky_tiled_plugins.clients.bluesky_run import BlueskyRunV3
 from ophyd_async.epics.adkinetix import KinetixDetector
 from ophyd_async.epics.motor import Motor as AsyncEpicsMotor
@@ -17,6 +18,8 @@ from skimage.measure._regionprops import RegionProperties
 from hextools.detectors.phantom import PhantomDetector
 from hextools.motors import RotationMotor
 from hextools.photon_delivery_system import Shutter
+from hextools.photon_delivery_system.shutter import ensure_shutter_closed, ensure_shutter_open
+from hextools.utils import ensure_available
 
 Image = np.ndarray[tuple[int, int], np.dtype[np.uint16] | np.dtype[np.uint8]]
 BinaryImage = np.ndarray[tuple[int, int], np.dtype[np.bool_]]
@@ -368,15 +371,15 @@ def check_alignment(
 
 def tomo_alignment_scan(
     dets: list[KinetixDetector | PhantomDetector],
-    rotation_stage: RotationMotor,
-    front_end_shutter: Shutter,
-    photon_shutter: Shutter,
     exposure_time: float,
     num_projections: int = 37,
     init_angle: float = 0.0,
     stop_angle: float = 360.0,
     base_x_offset: float = 0.0,
     sample_stage_x: AsyncEpicsMotor | None = None,
+    rot_motor: RotationMotor | None = None,
+    fe_shutter: Shutter | None = None,
+    photon_shutter: Shutter | None = None,
 ):
     """Tomography alignment scan.
 
@@ -384,12 +387,12 @@ def tomo_alignment_scan(
     ----------
     dets : list[KinetixDetector | PhantomDetector]
         List of detectors to use for the scan.
-    rotation_stage : RotationMotor
-        The rotation stage motor.
-    front_end_shutter : Shutter
-        The front-end shutter.
-    photon_shutter : Shutter
-        The photon shutter.
+    rot_motor : RotationMotor | None, optional
+        The rotation stage motor, by default None.
+    fe_shutter : Shutter | None, optional
+        The front-end shutter, by default None.
+    photon_shutter : Shutter | None, optional
+        The photon shutter, by default None.
     exposure_time : float
         Exposure time for each projection in seconds.
     num_projections : int, optional
@@ -403,44 +406,54 @@ def tomo_alignment_scan(
     sample_stage_x : AsyncEpicsMotor | None, optional
         The sample stage X motor, by default None.
     """
-    # Check the shutter statuses
-    fe_shutter_open = yield from bps.rd(front_end_shutter.status)
-    photon_shutter_open = yield from bps.rd(photon_shutter.status)
 
-    # FE shutter must already be open. If not, raise an error.
-    # If the photon shutter is closed, open it.
-    if not fe_shutter_open:
-        raise ValueError(
-            "Front-end shutter is closed. Please open it before starting the scan."
+    # If not passed in as args, pull devices from namespace
+    fe_shutter = ensure_available(Shutter, fe_shutter=fe_shutter)
+    photon_shutter = ensure_available(Shutter, photon_shutter=photon_shutter)
+    rot_motor = ensure_available(RotationMotor, rot_motor=rot_motor)
+    sample_stage_x = ensure_available(AsyncEpicsMotor, sample_stage_x=sample_stage_x)
+
+    # Make sure our two shutters are open
+    yield from ensure_shutter_open(fe_shutter)
+    yield from ensure_shutter_open(photon_shutter, allow_actuation=True)
+
+    # Reset positions of motors used regardless if scan succeeds or fails.
+    motors: list[AsyncEpicsMotor] = [rot_motor]
+    if abs(base_x_offset) > 0.0:
+        motors.append(sample_stage_x)
+
+    @bpp.reset_positions_decorator(devices=motors)
+    def _body():
+
+        # Set the rotation stage to the maximum velocity before starting the scan
+        max_velocity = yield from bps.rd(rot_motor.max_velocity)
+        yield from bps.mv(rot_motor.velocity, max_velocity)
+        yield from bps.mv(rot_motor, init_angle)
+
+        for det in dets:
+            yield from bps.mv(det.driver.acquire_time, exposure_time)
+
+        # Optionally, take a single flat image
+        # TODO: May be worth just merging parts of the projections into a flat
+        # instead of taking a separate flat image
+        flat_uid = None
+        if abs(base_x_offset) > 0.0:
+            yield from bps.mvr(sample_stage_x, base_x_offset)
+            flat_uid = yield from bp.count(
+                dets, md={"description": "Flat-field image for tomography alignment"}
+            )
+            yield from bps.mvr(sample_stage_x, -base_x_offset)
+
+        _md = {
+            "description": "Tomography alignment scan",
+        }
+        if flat_uid is not None:
+            _md["flat_uid"] = flat_uid
+        yield from bp.scan(
+            dets, rot_motor, init_angle, stop_angle, num_projections, md=_md
         )
-    if not photon_shutter_open:
-        yield from bps.mv(photon_shutter, True)
 
-    # Set the rotation stage to the maximum velocity before starting the scan
-    max_velocity = yield from bps.rd(rotation_stage.max_velocity)
-    yield from bps.mv(rotation_stage.velocity, max_velocity)
-    yield from bps.mv(rotation_stage, init_angle)
+    def _cleanup():
+        yield from ensure_shutter_closed(photon_shutter, allow_actuation=True)
 
-    for det in dets:
-        yield from bps.mv(det.driver.acquire_time, exposure_time)
-        yield from bps.mv(
-            det.driver.acquire_period, exposure_time + 0.002
-        )  # TODO: Don't hard code this
-
-    # Optionally, take a single flat image
-    flat_uid = None
-    if abs(base_x_offset) > 0.0 and sample_stage_x is not None:
-        yield from bps.mvr(sample_stage_x, base_x_offset)
-        flat_uid = yield from bp.count(
-            dets, md={"description": "Flat-field image for tomography alignment"}
-        )
-        yield from bps.mvr(sample_stage_x, -base_x_offset)
-
-    _md = {
-        "description": "Tomography alignment scan",
-    }
-    if flat_uid is not None:
-        _md["flat_uid"] = flat_uid
-    yield from bp.scan(
-        dets, rotation_stage, init_angle, stop_angle, num_projections, md=_md
-    )
+    yield from bpp.finalize_wrapper(_body(), _cleanup()) 

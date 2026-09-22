@@ -26,6 +26,7 @@ from ophyd_async.epics.motor import Motor as AsyncEpicsMotor
 from pytest_mock import MockerFixture
 
 from hextools.motors import RotationMotor
+from hextools.photon_delivery_system.shutter import ShutterStatus
 from hextools.photon_delivery_system import Shutter
 from hextools.tomography.alignment import (
     ensure_run_is_valid,
@@ -328,11 +329,12 @@ def shutter_factory() -> Callable[[str], Shutter]:
         with init_devices(mock=True):
             shutter = Shutter(name, name=name)
         callback_on_mock_execute(
-            shutter.open_cmd, lambda: set_mock_value(shutter.status, True)
+            shutter.open_cmd, lambda: set_mock_value(shutter.status, ShutterStatus.OPEN)
         )
         callback_on_mock_execute(
-            shutter.close_cmd, lambda: set_mock_value(shutter.status, False)
+            shutter.close_cmd, lambda: set_mock_value(shutter.status, ShutterStatus.CLOSED)
         )
+        set_mock_value(shutter.status, ShutterStatus.CLOSED)
         return shutter
 
     return _factory
@@ -399,15 +401,11 @@ async def test_tomo_alignment_scan_fails_if_fe_shutter_closed(
 ):
 
     fe_shutter, photon_shutter = two_shutters
-    rotation_motor, _ = motors
-    assert not any(
-        await asyncio.gather(
-            fe_shutter.status.get_value(), photon_shutter.status.get_value()
-        )
-    )
+    rotation_motor, sample_stage_x = motors
+    assert await fe_shutter.status.get_value() == ShutterStatus.CLOSED
 
-    with pytest.raises(ValueError, match="Front-end shutter is closed"):
-        RE(tomo_alignment_scan([], rotation_motor, fe_shutter, photon_shutter, 0.1))
+    with pytest.raises(ValueError, match="front_end_shutter is not open"):
+        RE(tomo_alignment_scan([], 0.1, rot_motor=rotation_motor, sample_stage_x=sample_stage_x, fe_shutter=fe_shutter, photon_shutter=photon_shutter, base_x_offset=0.1))
 
 
 @pytest.mark.parametrize(
@@ -417,12 +415,11 @@ async def test_tomo_alignment_scan_fails_if_fe_shutter_closed(
         "init_angle",
         "stop_angle",
         "base_x_offset",
-        "include_sample_stage_x",
     ),
     [
-        (0.1, 37, 0.0, 360.0, 0.0, True),
-        (0.4, 11, 0.0, 360.0, 10.0, False),
-        (1.0, 21, -50.0, 50.0, 10.0, True),
+        (0.1, 37, 0.0, 360.0, 0.0),
+        (0.4, 11, 0.0, 360.0, 10.0),
+        (1.0, 21, -50.0, 50.0, 10.0),
     ],
 )
 async def test_tomo_alignment_scan(
@@ -435,7 +432,6 @@ async def test_tomo_alignment_scan(
     init_angle: float,
     stop_angle: float,
     base_x_offset: float,
-    include_sample_stage_x: bool,
 ):
     rotation_motor, sample_stage_x = motors
     fe_shutter, photon_shutter = two_shutters
@@ -444,7 +440,7 @@ async def test_tomo_alignment_scan(
 
     set_mock_value(rotation_motor.max_velocity, 10000)
     max_velocity = await rotation_motor.max_velocity.get_value()
-    assert not await photon_shutter.status.get_value()
+    assert await photon_shutter.status.get_value() == ShutterStatus.CLOSED
 
     docs: dict[str, list[dict[str, Any]]] = {}
 
@@ -464,25 +460,25 @@ async def test_tomo_alignment_scan(
         else:
             messages_by_type[msg.command] = [msg]
 
-    RE.msg_hook = msg_hook
+    RE.msg_hook = msg_hook  # type: ignore
 
     runs: RunEngineResult = RE(
         tomo_alignment_scan(
             [ktx1],
-            rotation_motor,
-            fe_shutter,
-            photon_shutter,
             exposure_time,
+            rot_motor=rotation_motor,
+            fe_shutter=fe_shutter,
+            photon_shutter=photon_shutter,
             num_projections=num_projections,
             init_angle=init_angle,
             stop_angle=stop_angle,
             base_x_offset=base_x_offset,
-            sample_stage_x=None if not include_sample_stage_x else sample_stage_x,
+            sample_stage_x=sample_stage_x
         ),
         cache_docs,  # type: ignore
     )  # type: ignore
 
-    expecting_flat_run = base_x_offset > 0.0 and include_sample_stage_x
+    expecting_flat_run = abs(base_x_offset) > 0.0
 
     assert await rotation_motor.velocity.get_value() == max_velocity
     assert await photon_shutter.status.get_value()
@@ -497,7 +493,9 @@ async def test_tomo_alignment_scan(
         assert len(docs[doc_type]) == expected_num_events
 
     assert await ktx1.driver.acquire_time.get_value() == exposure_time
-    assert await rotation_motor.user_readback.get_value() == stop_angle
+    # the plan resets the positions of the motors it moves, so the rotation
+    # stage ends back where it started, not at stop_angle
+    assert await rotation_motor.user_readback.get_value() == 0.0
 
     if not expecting_flat_run:
         assert len(runs.run_start_uids) == 1
@@ -513,7 +511,9 @@ async def test_tomo_alignment_scan(
                 else:
                     assert msg.args == np.float64(0.0)
                 sample_staged_move_counter += 1
-        assert sample_staged_move_counter == 2
+        # offset for the flat field, back to zero, then the reset by the
+        # reset_positions decorator
+        assert sample_staged_move_counter == 3
         assert await sample_stage_x.user_readback.get_value() == 0.0
 
     for i, msg in enumerate(messages):
