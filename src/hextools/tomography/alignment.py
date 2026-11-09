@@ -760,11 +760,7 @@ def tomo_alignment_scan(
 
         _md = {
             "description": "Tomography alignment scan",
-<<<<<<< HEAD
             "plan_name": "tomo_alignment_scan",
-=======
-            "plan_name": "tomography_alignment_scan",
->>>>>>> 2563c0aebf66e19d41162922d2c1d512a27a7ea0
             "tiled_specs": [
                 {
                     "name": TOMO_ALIGNMENT_SCAN_V1.name,
