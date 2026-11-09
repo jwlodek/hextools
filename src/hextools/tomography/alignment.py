@@ -758,8 +758,13 @@ def tomo_alignment_scan(
 
         _md = {
             "description": "Tomography alignment scan",
-            "plan_name": "tomography_alignment_scan",
-            "tiled_specs": [TOMO_ALIGNMENT_SCAN_V1],
+            "plan_name": "tomo_alignment_scan",
+            "tiled_specs": [
+                {
+                    "name": TOMO_ALIGNMENT_SCAN_V1.name,
+                    "version": TOMO_ALIGNMENT_SCAN_V1.version,
+                }
+            ],
         }
 
         yield from bp.scan(
